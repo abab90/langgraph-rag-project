@@ -1,6 +1,9 @@
 # langgraph-rag-project
 LangGraph Agentic RAG Workflow with Human in the Loop
+
+                                                 
                                                       عبدالله خالد الفهد , عبدالاله محمد البشر
+
 ## 📝 Workflow Logic & Patterns Used:
 
 * **Router Pattern:** Used to intelligently direct the user query to the appropriate knowledge domain (Support Policy vs. Course Info) based on intent.
