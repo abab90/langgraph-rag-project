@@ -10,23 +10,29 @@ LangGraph Agentic RAG Workflow with Human in the Loop
 
 ## Track & Pattern Classification
 
-* **Track Chosen:** Agentic Workflows & Multi-Pattern Systems.
+* **Official Track Assigned:** **Track C (Routing between domain knowledge sources)**.
 * **Workflow Pattern:** **Agentic RAG with Human-in-the-Loop (HITL) Interrupts**.
 * **RAG Architecture Choice:** **Agentic RAG (Router-Based Retrieval)**.
-  * *Justification:* We selected an Agentic/Router RAG pattern instead of a naive 2-Step pipeline because direct similarity retrieval on all queries introduces noise and unnecessary embedding calls. Using an LLM-driven router ensures vector database queries are executed strictly when domain context (e.g., support or course policy) is needed.
+  * *Justification:* We selected an Agentic/Router RAG pattern (Track C) over a naive 2-step retrieval pipeline because executing vector search blindly across all user queries introduces noise and unnecessary embedding lookups. By using an LLM-driven router, the system selectively routes queries either to domain-specific knowledge bases (Support Policy vs. Course Info) or skips external retrieval entirely when unnecessary.
 
 ---
 
 ## Rubric Write-Up & Architectural Patterns Used
 
-1. **LLM Router Pattern:** Replaced naive string matching with an LLM structured output classification using **Google Gemini (`gemini-1.5-flash`)**. The LLM dynamically determines the query destination (`support`, `course`, or `general`).
-2. **Vector RAG Pipeline:** Integrated FAISS vector store with **FastEmbed Embeddings** (`FastEmbedEmbeddings`). Document chunks are retrieved via vector similarity search top-k retrieval rather than hardcoded string returns.
-3. **Human-in-the-Loop (HITL):** Built an end-to-end interrupt and resume workflow using `langgraph.types.interrupt` and `Command(resume="yes")` to pause execution for human verification on sensitive refund operations.
-4. **Resilience & Error Handling:** Implemented `RetryPolicy(max_attempts=3)` decorators on external LLM and vector store tasks to automatically retry transient network failures, alongside a fallback loopback mechanism for invalid routing states.
-5. **Observability:** Enabled LangSmith tracing configuration (`LANGCHAIN_TRACING_V2=true`) to monitor state transitions, routing decisions, latency bottlenecks, and vector retrieval relevance.
+1. **LLM Router Pattern:** Replaced static intent matching with structured LLM output classification using **Google Gemini (`gemini-1.5-flash`)**. The LLM dynamically determines the target domain (`support`, `course`, or `general`).
+2. **Vector RAG Pipeline:** Integrated a local FAISS vector store with **FastEmbed Embeddings** (`FastEmbedEmbeddings`). Chunks generated via `RecursiveCharacterTextSplitter` are embedded and retrieved dynamically through similarity search top-k matching.
+3. **Human-in-the-Loop (HITL):** Implemented state persistence and human verification using `langgraph.types.interrupt` and `Command(resume="yes")`. The graph pauses execution upon identifying sensitive operations (e.g., refund queries) and resumes seamlessly upon supervisor authorization via `MemorySaver`.
+4. **Resilience & Error Handling Strategies:**
+   * **Task Retry Policy:** Decorated external tasks with `RetryPolicy(max_attempts=3)` to automatically recover from transient network or API rate-limit errors.
+   * **Fallback Routing Mechanism:** Integrated a keyword-based fallback inside the routing task's exception handler to guarantee deterministic destination handling if structured LLM output invocation fails.
+5. **Observability:** Prepared and structured for LangSmith tracing (`LANGCHAIN_TRACING_V2`) to enable execution graph logging, monitoring state transitions across tasks, and verifying human-in-the-loop state interrupts.
 
 ---
 
-## LangSmith Trace Insights
+## Execution & Tracing Summary
 
-* **Observation:** During execution tracing, the LLM Router task completed classification in ~350ms, while vector retrieval took ~120ms. The trace clearly indicated state suspension at the `interrupt` node, preserving full context in `MemorySaver` until the `Command(resume="yes")` event re-instantiated execution to generate the final dynamic LLM output.
+* **Observed Execution Flow:** 
+  1. The workflow initiates with query classification via `route_query_task`, resolving the intent to `support`.
+  2. `retrieve_docs` fetches the relevant document chunk from FAISS (`Support Policy: Refund is allowed within 14 days...`).
+  3. The execution encounters the `interrupt` node, persisting state in `MemorySaver` and waiting for human intervention.
+  4. Upon issuing `Command(resume="yes")`, execution resumes at `generate_final_response`, where Gemini 1.5 Flash synthesizes the final professional response based on retrieved context.
