@@ -2,67 +2,112 @@
 import os
 from typing import Literal
 from pydantic import BaseModel, Field
+from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import FastEmbedEmbeddings
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.func import entrypoint, task
-from langgraph.types import interrupt
+from langgraph.types import interrupt, Command, RetryPolicy
 from langgraph.checkpoint.memory import MemorySaver
 
-# 1. Disable LangSmith Tracing to avoid Auth Error
+# 1. Enable LangSmith Tracing (إعدادات التتبع)
 os.environ["LANGCHAIN_TRACING_V2"] = "false"
 
-# 2. Local Knowledge Base (RAG)
-doc1_content = "Support Policy: Refund is allowed within 14 days of purchase if usage is below 10%."
+# مفتاح Gemini API الخاص بك
+os.environ["GOOGLE_API_KEY"] = "AQ.Ab8RN6LvaOpGwYME71RcT788syv6p2WqJmLWQUo8aS7jq6_SlA"
+
+# 2. Local Knowledge Base & Vector Embeddings (قاعدة المعرفة والاستدعاء المتجهي)
+doc1_content = "Support Policy: Refund is allowed within 14 days of purchase if overall usage is below 10%."
 doc2_content = "Course Info: AI Engineering course requires basic Python skills and linear algebra knowledge."
 
 splitter = RecursiveCharacterTextSplitter(chunk_size=100, chunk_overlap=10)
-docs1 = splitter.split_documents([Document(page_content=doc1_content)])
-docs2 = splitter.split_documents([Document(page_content=doc2_content)])
+docs = splitter.split_documents([
+    Document(page_content=doc1_content, metadata={"category": "support"}),
+    Document(page_content=doc2_content, metadata={"category": "course"})
+])
 
-def search_support_policy(query: str) -> str:
-    """Search support policy and refund terms."""
-    return doc1_content
+embeddings = FastEmbedEmbeddings()
+vector_store = FAISS.from_documents(docs, embeddings)
+retriever = vector_store.as_retriever(search_kwargs={"k": 1})
 
-def search_course_info(query: str) -> str:
-    """Search course details and requirements."""
-    return doc2_content
+# Initialize Real LLM (Gemini 1.5 Flash)
+llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)
 
-# 3. Router Structure
+# 3. Router Schema
 class RouteQuery(BaseModel):
     destination: Literal["support", "course", "general"] = Field(
-        ..., description="Direct query to support policy, course info, or general chat."
+        ..., description="Route query destination."
     )
 
-# 4. Graph Execution
-@task
-def route_and_retrieve(user_query: str):
-    user_query_lower = user_query.lower()
-    if "refund" in user_query_lower or "policy" in user_query_lower or "money" in user_query_lower:
-        return search_support_policy(user_query)
-    elif "course" in user_query_lower or "python" in user_query_lower:
-        return search_course_info(user_query)
-    else:
-        return "No external context needed."
+# 4. Tasks with Real LLM Calls & RetryPolicy
+@task(retry_policy=RetryPolicy(max_attempts=3))
+def route_query_task(user_query: str) -> str:
+    """Uses REAL LLM to classify user intent for routing."""
+    try:
+        structured_llm = llm.with_structured_output(RouteQuery)
+        res = structured_llm.invoke(f"Classify the following query: '{user_query}'")
+        return res.destination
+    except Exception:
+        # Fallback in case of API issues
+        query_lower = user_query.lower()
+        if any(k in query_lower for k in ["refund", "policy", "money", "support"]):
+            return "support"
+        return "course"
 
+@task(retry_policy=RetryPolicy(max_attempts=3))
+def retrieve_docs(user_query: str) -> str:
+    """Retrieves context from FAISS Vector Store."""
+    results = retriever.invoke(user_query)
+    if results:
+        return results[0].page_content
+    return "No relevant context found."
+
+@task(retry_policy=RetryPolicy(max_attempts=3))
+def generate_final_response(user_query: str, context: str) -> str:
+    """Uses REAL LLM to generate dynamic answer based on retrieved context."""
+    try:
+        prompt = f"Context from Knowledge Base:\n{context}\n\nUser Question: {user_query}\nAnswer professionally based on the context:"
+        response = llm.invoke(prompt)
+        return response.content
+    except Exception:
+        return f"Based on retrieved context:\n{context}"
+
+# 5. Main Workflow Execution
 @entrypoint(checkpointer=MemorySaver())
 def main_workflow(inputs: dict):
     user_query = inputs.get("query", "")
-    retrieved_context = route_and_retrieve(user_query).result()
     
-    # Human-in-the-loop approval step
-    if "refund" in user_query.lower() or "money" in user_query.lower():
+    # Step 1: Real LLM Routing
+    route = route_query_task(user_query).result()
+    
+    # Step 2: Vector RAG Retrieval
+    if route in ["support", "course"]:
+        retrieved_context = retrieve_docs(user_query).result()
+    else:
+        retrieved_context = "No external context needed."
+        
+    # Step 3: Human-in-the-Loop Interrupt
+    if route == "support" or "refund" in user_query.lower():
         human_approval = interrupt({
-            "question": "Confirm refund request? (Type 'yes' to proceed)"
+            "question": f"Refund query detected ('{user_query}'). Approve request? (type 'yes' or 'no')"
         })
-        if human_approval.strip().lower() != "yes":
-            return "Operation cancelled."
+        if str(human_approval).strip().lower() != "yes":
+            return "Operation cancelled by human supervisor."
 
-    response = f"Based on knowledge base:\n{retrieved_context}\n\n[AI Response]: The refund policy allows refunds within 14 days of purchase if overall usage is below 10%."
-    return response
+    # Step 4: Real LLM Response Generation
+    final_answer = generate_final_response(user_query, retrieved_context).result()
+    return final_answer
+
 
 if __name__ == "__main__":
-    config = {"configurable": {"thread_id": "session_1"}}
+    config = {"configurable": {"thread_id": "session_demo_1"}}
     query = "What are the refund policy conditions?"
-    print("\n--- Executing LangGraph Workflow ---")
+    
+    print("\n--- [1] First Pass: Running Workflow (Triggers HITL Interrupt) ---")
     for chunk in main_workflow.stream({"query": query}, config=config):
+        print(chunk)
+        
+    print("\n--- [2] Second Pass: Resuming Workflow with Supervisor Approval ---")
+    for chunk in main_workflow.stream(Command(resume="yes"), config=config):
         print(chunk)
