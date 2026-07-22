@@ -11,13 +11,16 @@ from langgraph.func import entrypoint, task
 from langgraph.types import interrupt, Command, RetryPolicy
 from langgraph.checkpoint.memory import MemorySaver
 
-# 1. Enable LangSmith Tracing (إعدادات التتبع)
+# 1. Tracing Configuration (موقف لمنع أخطاء المصادقة محلياً)
 os.environ["LANGCHAIN_TRACING_V2"] = "false"
 
-# مفتاح Gemini API الخاص بك
-os.environ["GOOGLE_API_KEY"] = "AQ.Ab8RN6LvaOpGwYME71RcT788syv6p2WqJmLWQUo8aS7jq6_SlA"
+# 2. Gemini API Key Configuration
+os.environ["GOOGLE_API_KEY"] = os.getenv(
+    "GOOGLE_API_KEY", 
+    "AQ.Ab8RN6LvaOpGwYME71RcT788syv6p2WqJmLWQUo8aS7jq6_SlA"
+)
 
-# 2. Local Knowledge Base & Vector Embeddings (قاعدة المعرفة والاستدعاء المتجهي)
+# 3. Local Knowledge Base & Vector Embeddings
 doc1_content = "Support Policy: Refund is allowed within 14 days of purchase if overall usage is below 10%."
 doc2_content = "Course Info: AI Engineering course requires basic Python skills and linear algebra knowledge."
 
@@ -34,13 +37,13 @@ retriever = vector_store.as_retriever(search_kwargs={"k": 1})
 # Initialize Real LLM (Gemini 1.5 Flash)
 llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)
 
-# 3. Router Schema
+# 4. Router Schema
 class RouteQuery(BaseModel):
     destination: Literal["support", "course", "general"] = Field(
         ..., description="Route query destination."
     )
 
-# 4. Tasks with Real LLM Calls & RetryPolicy
+# 5. Tasks with Real LLM Calls & Retry Policy
 @task(retry_policy=RetryPolicy(max_attempts=3))
 def route_query_task(user_query: str) -> str:
     """Uses REAL LLM to classify user intent for routing."""
@@ -49,7 +52,6 @@ def route_query_task(user_query: str) -> str:
         res = structured_llm.invoke(f"Classify the following query: '{user_query}'")
         return res.destination
     except Exception:
-        # Fallback in case of API issues
         query_lower = user_query.lower()
         if any(k in query_lower for k in ["refund", "policy", "money", "support"]):
             return "support"
@@ -73,7 +75,7 @@ def generate_final_response(user_query: str, context: str) -> str:
     except Exception:
         return f"Based on retrieved context:\n{context}"
 
-# 5. Main Workflow Execution
+# 6. Main Workflow Execution
 @entrypoint(checkpointer=MemorySaver())
 def main_workflow(inputs: dict):
     user_query = inputs.get("query", "")
