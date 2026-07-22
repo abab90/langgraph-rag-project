@@ -43,15 +43,16 @@ class RouteQuery(BaseModel):
         ..., description="Route query destination."
     )
 
-# 5. Tasks with Real LLM Calls & Retry Policy
+# 5. Tasks with Real LLM Calls, RetryPolicy, and Graceful Fallback
 @task(retry_policy=RetryPolicy(max_attempts=3))
 def route_query_task(user_query: str) -> str:
-    """Uses REAL LLM to classify user intent for routing."""
+    """Uses REAL LLM to classify user intent for routing with keyword fallback."""
     try:
         structured_llm = llm.with_structured_output(RouteQuery)
         res = structured_llm.invoke(f"Classify the following query: '{user_query}'")
         return res.destination
     except Exception:
+        # Fallback Strategy: Keyword matching if LLM structured output invocation fails
         query_lower = user_query.lower()
         if any(k in query_lower for k in ["refund", "policy", "money", "support"]):
             return "support"
